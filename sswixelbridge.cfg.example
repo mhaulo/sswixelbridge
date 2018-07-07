@@ -1,0 +1,4 @@
+api_endpoint = "https://sokeriseuranta.fi/api/v1/log_entries"
+api_token = "foo"
+user_email= "foo"
+wixel_connection_type = "usb"
