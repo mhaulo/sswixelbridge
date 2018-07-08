@@ -38,8 +38,8 @@
 #include <json-c/json.h>
 #include <curl/curl.h>
 
-#define UNPRIVILEGED_USER  65534 // nobody
-#define UNPRIVILEGED_GROUP 65534 // nobody
+#define UNPRIVILEGED_USER  1000 // pi
+#define UNPRIVILEGED_GROUP 1000 // pi
 
 static int keep_going = 1;
 static int upload_to_cloud = 1;
@@ -86,9 +86,8 @@ struct curl_fetch_st {
 /* Standard daemonizing */
 void daemonize()
 {
-	pid_t pid;
+	pid_t pid = fork();
 	
-	pid = fork();
 	if (pid < 0) {
 		exit(EXIT_FAILURE);
 	}
@@ -96,18 +95,12 @@ void daemonize()
 		exit(EXIT_SUCCESS);
 	}
 
-	if (setsid() < 0) {
+	pid_t sid = setsid();
+
+	if (sid < 0) {
 		exit(EXIT_FAILURE);
 	}
 
-	pid = fork();
-	if (pid < 0) {
-		exit(EXIT_FAILURE);
-	}
-	else if (pid > 0) {
-		exit(EXIT_SUCCESS);
-	}
-	
 	umask(0);
 	chdir("/");
 
@@ -117,7 +110,31 @@ void daemonize()
 		close(x);
 	}
 
- 	openlog("sswixelbridge", LOG_PID, LOG_DAEMON);
+	int pid_file = open("/var/run/sswixelbridge.pid", O_CREAT | O_RDWR, 0666);
+	int rc = flock(pid_file, LOCK_EX | LOCK_NB);
+
+	// Another instance is running, can't lock pid file.
+	if (rc && errno == EWOULDBLOCK) {
+		exit(EXIT_FAILURE);
+	}
+
+	FILE *f = fdopen(pid_file, "w");
+
+	// Cannot open pid file for writing.
+	if (f == NULL) {
+		exit(EXIT_FAILURE);
+	}
+
+	pid = getpid();
+
+	// Cannot write pid to the pid file.
+	if (!fprintf(f, "%d\n", pid)) {
+		close(pid_file);
+		exit(EXIT_FAILURE);
+	}
+
+	fflush(f);
+	close(pid_file);
 }
 
 
@@ -142,6 +159,7 @@ void handle_signal(int signal)
 			}
 			
 			closelog();
+			unlink("/var/run/sswixelbridge.pid");
 			exit(EXIT_SUCCESS);
 			
 			break;
@@ -165,7 +183,9 @@ void read_params(int argc, char **argv)
 		switch (option)
 		{
 			case 'c':
-				config_file = malloc(strlen(optarg) + 1);
+				if (optarg != NULL) {
+					config_file = malloc(strlen(optarg) + 1);
+				}
 				break;
 			case 'd':
 				run_as_daemon = 1;
@@ -547,29 +567,44 @@ int upload_data(sensor_data_t *data)
 
 int main(int argc, char **argv)
 {
+	syslog(LOG_INFO, "Sokeriseuranta Wixel Bridge 0.1 starting...");
+
 	read_params(argc, argv);
 	
 	if (config_file == NULL) {
-		config_file = "sswixelbridge.cfg";
+		syslog(LOG_WARNING, "No config file provided, using default.");
+		config_file = "/etc/sswixelbridge/sswixelbridge.conf";
+	}
+
+	if (!read_config(config_file)) {
+		syslog(LOG_ERR, "Unable to read config file");
+		exit(EXIT_FAILURE);
 	}
 	
-	read_config(config_file);
 	
 	if (run_as_daemon == 1) {
+		syslog(LOG_INFO, "Going to daemonized mode");
 		daemonize();
+		openlog("sswixelbridge", LOG_PID, LOG_DAEMON);
 	}
-	
-	syslog(LOG_INFO, "Sokeriseuranta Wixel Bridge starting...");
-	
-	setuid(UNPRIVILEGED_USER);
-	setgid(UNPRIVILEGED_GROUP);
-		
+	else {
+		openlog("sswixelbridge", LOG_PID, LOG_USER);
+	}
+
+	// 2018-07-08
+	// Dropping privileges seems to be causing problems in daemonized mode - 
+	// the unprivileged user cannot read serial, even when belonging to the
+	// dialout group. So whatta heck. Just go root. There's no user input to
+	// this service so I see no problem.
+	//setuid(UNPRIVILEGED_USER);
+	//setgid(UNPRIVILEGED_GROUP);
+
 	signal(SIGTERM, handle_signal);
 	signal(SIGINT, handle_signal);
 	signal(SIGHUP, handle_signal);
-	
+
 	int wixel = find_wixel(wixel_connection_type);
-		
+
 	while (keep_going) {
 		if (access("/dev/ttyACM0", F_OK) == -1 &&
 			access("/dev/ttyACM1", F_OK) == -1 &&
@@ -584,29 +619,30 @@ int main(int argc, char **argv)
 		if (fcntl(wixel, F_GETFD) == -1 || errno == EBADF) {
 			wixel = find_wixel(wixel_connection_type);
 		}
-			
+
 		sensor_data_t *data = read_wixel(wixel);
 		
 		if (data != NULL) {
 			float value = raw_to_bg(data->raw_value, data->filtered_value);
-			syslog(LOG_INFO, "Got bg value %.2f", value);
+			syslog(LOG_DEBUG, "Got bg value %.2f", value);
 		}
-		
+
 		if (data != NULL && upload_to_cloud == 1 && data->bg_value > 0) {
-			syslog(LOG_INFO, "Uploading bg value %.2f", data->bg_value);
+			syslog(LOG_DEBUG, "Uploading bg value %.2f", data->bg_value);
 			upload_data(data);
 		}
 		else {
-			syslog(LOG_WARNING, "There's something wrong with received bg value. Not uploading it.");
+			syslog(LOG_DEBUG, "There's something wrong with received bg value. Not uploading it.");
 		}
-		
+
 		close(wixel);
 		free(data);
 		sleep(6);
 	}
-	
+
 	close(wixel);
 	closelog();
-	
+	unlink("/var/run/sswixelbridge.pid");
+
 	return EXIT_SUCCESS;
 }

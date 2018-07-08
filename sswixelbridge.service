@@ -3,12 +3,12 @@ Description=Sokeriseuranta Wixel Uploader server
 After=network.target
 
 [Service]
-EnvironmentFile=-/etc/sswixelbridge/sswixelbridge.conf
-ExecStart=/usr/share/bin/sswixelbridge -d -c /etc/sswixelbridge/sswixelbridge.conf
+Type=forking
+PIDFile=/var/run/sswixelbridge.pid
+ExecStart=/usr/sbin/sswixelbridge -d -c /etc/sswixelbridge/sswixelbridge.conf
 ExecReload=/bin/kill -HUP $MAINPID
 ExecStop=/bin/kill -TERM $MAINPID
 KillMode=process
-Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
